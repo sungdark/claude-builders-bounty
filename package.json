@@ -1,0 +1,23 @@
+{
+  "name": "claude-review",
+  "version": "1.0.0",
+  "description": "Claude Code sub-agent that reviews PRs and posts structured comments",
+  "main": "dist/cli.js",
+  "bin": {
+    "claude-review": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/cli.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
+    "@octokit/rest": "^21.0.0",
+    "commander": "^13.0.0",
+    "dotenv": "^16.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0"
+  }
+}
