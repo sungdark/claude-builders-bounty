@@ -1,0 +1,79 @@
+name: 🤖 Auto PR Review
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run PR Review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          # Make the script executable
+          chmod +x ./claude-review.sh
+          
+          # Run the review
+          ./claude-review.sh --pr "$PR_URL" --output pr-review.md
+          
+          # Post comment with review
+          REVIEW_CONTENT=$(cat pr-review.md)
+          REVIEW_BODY="${REVIEW_CONTENT//'%'/'%25'}"
+          REVIEW_BODY="${REVIEW_BODY//$'\n'/'%0A'}"
+          REVIEW_BODY="${REVIEW_BODY//$'\r'/'%0D'}"
+          
+          echo "Review output:"
+          cat pr-review.md
+
+      - name: Post review comment
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Post the review as a comment
+          gh pr comment $PR_NUMBER --body-file pr-review.md
+
+  review-on-demand:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'issue_comment' && github.event.comment.body.startsWith('/review')
+    
+    steps:
+      - name: Parse PR URL from comment
+        id: parse
+        run: |
+          COMMENT_BODY="${{ github.event.comment.body }}"
+          PR_URL=$(echo "$COMMENT_BODY" | sed -n 's|/review\s*\(https://github.com/[^/]+/[^/]+/pull/[0-9]+\)|https://github.com/\1|p')
+          echo "PR_URL=$PR_URL" >> $GITHUB_OUTPUT
+          
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run PR Review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ steps.parse.outputs.PR_URL }}
+        run: |
+          chmod +x ./claude-review.sh
+          ./claude-review.sh --pr "$PR_URL" --output pr-review.md
+          cat pr-review.md
+
+      - name: Post review comment
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          gh api repos/{owner}/{repo}/issues/$ISSUE_NUMBER/comments \
+            --field body="@${{ github.event.comment.user.login }} here's your PR review:" \
+            -H "Accept: application/vnd.github+json" || true
