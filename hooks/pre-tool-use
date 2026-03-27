@@ -1,0 +1,91 @@
+#!/bin/bash
+# pre-tool-use hook: blocks destructive bash commands before execution
+# Install: ln -sf /path/to/pre-tool-use.sh ~/.claude/hooks/pre-tool-use
+# Usage: This script is invoked by Claude Code with tool arguments
+
+BLOCKED_LOG="${HOME}/.claude/hooks/blocked.log"
+PROJECT_PATH="${PWD}"
+
+# The hook receives tool input via stdin (JSON)
+# We extract the command from the input
+INPUT=$(cat)
+
+# Extract the command from Claude Code hook input
+# Claude Code passes: {"command": "...", ...} or the raw command string
+COMMAND=""
+if echo "$INPUT" | grep -q '"command"'; then
+    COMMAND=$(echo "$INPUT" | grep -o '"command"[[:space:]]*:[[:space:]]*[^,}]*' | sed 's/"command"[[:space:]]*:[[:space:]]*"//;s/"$//' | sed 's/\\"/"/g')
+else
+    COMMAND="$INPUT"
+fi
+
+# Normalize whitespace for easier matching
+CMD_NORM=$(echo "$COMMAND" | tr -s ' ' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+# Check for dangerous patterns
+BLOCKED=false
+REASON=""
+
+# Pattern 1: rm -rf (any form)
+if echo "$CMD_NORM" | grep -Ei "^rm[[:space:]]+-rf[[:space:]]+" > /dev/null 2>&1; then
+    BLOCKED=true
+    REASON="rm -rf detected: permanent recursive deletion"
+fi
+
+# Pattern 2: DROP TABLE (SQL)
+if echo "$CMD_NORM" | grep -Ei "DROP[[:space:]]+TABLE" > /dev/null 2>&1; then
+    BLOCKED=true
+    REASON="DROP TABLE detected: permanent database table deletion"
+fi
+
+# Pattern 3: TRUNCATE
+if echo "$CMD_NORM" | grep -Ei "TRUNCATE[[:space:]]" > /dev/null 2>&1; then
+    BLOCKED=true
+    REASON="TRUNCATE detected: permanent table content deletion"
+fi
+
+# Pattern 4: git push --force
+if echo "$CMD_NORM" | grep -Ei "^git[[:space:]]+push[[:space:]]+.*--force" > /dev/null 2>&1; then
+    BLOCKED=true
+    REASON="git push --force detected: rewrites remote history"
+fi
+
+# Pattern 5: DELETE FROM without WHERE
+if echo "$CMD_NORM" | grep -Ei "DELETE[[:space:]]+FROM" > /dev/null 2>&1; then
+    # Allow if there's a WHERE clause
+    if ! echo "$CMD_NORM" | grep -Ei "WHERE" > /dev/null 2>&1; then
+        BLOCKED=true
+        REASON="DELETE FROM without WHERE: permanent data deletion"
+    fi
+fi
+
+# If blocked, log and report
+if [ "$BLOCKED" = true ]; then
+    TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+    
+    # Ensure log directory exists
+    mkdir -p "$(dirname "$BLOCKED_LOG")"
+    
+    # Log the blocked attempt
+    echo "[$TIMESTAMP] BLOCKED: $COMMAND" >> "$BLOCKED_LOG"
+    echo "  Project: $PROJECT_PATH" >> "$BLOCKED_LOG"
+    echo "  Reason: $REASON" >> "$BLOCKED_LOG"
+    echo "" >> "$BLOCKED_LOG"
+    
+    # Output blocked message to stderr (Claude Code will see it)
+    echo "⛔ HOOK BLOCKED: $REASON" >&2
+    echo "Command: $COMMAND" >&2
+    echo "This command has been blocked by the pre-tool-use security hook." >&2
+    echo "Log: $BLOCKED_LOG" >&2
+    echo "" >&2
+    echo "If you need to proceed, consider:" >&2
+    echo "  - Using 'rm -rf' on specific known-safe directories instead" >&2
+    echo "  - Adding WHERE clauses to DELETE FROM statements" >&2
+    echo "  - Using 'git push --force-with-lease' instead of --force" >&2
+    
+    # Exit with non-zero to signal block
+    exit 1
+fi
+
+# Not blocked - allow execution
+exit 0
