@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""
+Claude Code pre-tool-use hook: blocks destructive bash commands.
+Place at: ~/.claude/hooks/pre-tool-use
+Make executable: chmod +x ~/.claude/hooks/pre-tool-use
+
+Usage: Claude Code auto-runs this before each tool call.
+"""
+
+import json
+import os
+import re
+import sys
+from datetime import datetime
+
+HOOKS_DIR = os.path.dirname(os.path.abspath(__file__))
+BLOCKED_LOG = os.path.expanduser("~/.claude/hooks/blocked.log")
+PROJECT_PATH = os.environ.get("CLAUDE_PROJECT_PATH", os.getcwd())
+
+# Patterns that indicate destructive operations
+DESTRUCTIVE_PATTERNS = [
+    (r"^\s*rm\s+-rf\s+", "rm -rf: recursive force removal"),
+    (r"\bDROP\s+TABLE\b", "DROP TABLE: destructive database operation"),
+    (r"\bTRUNCATE\b", "TRUNCATE: destructive table operation"),
+    (r"\bgit\s+push\s+.*-f\b", "git push --force: rewrites remote history"),
+    (r"\bgit\s+push\s+.*--force\b", "git push --force: rewrites remote history"),
+    # DELETE FROM without WHERE (case insensitive, multiline body)
+    (r"DELETE\s+FROM\s+[^\s;]+(?:\s+WHERE\s+['\";\)]|\s*;|\s*$)", "DELETE FROM without WHERE clause", False),
+    (r"^\s*DELETE\s+FROM\s+\w+\s*;?\s*$", "DELETE FROM without WHERE clause"),
+    # Fork bomb
+    (r":\(\)\{.*:\|.*:\&\};:", "Fork bomb detected"),
+]
+
+# Build regexes - some are multiline-aware
+COMPILED_PATTERNS = []
+for p in DESTRUCTIVE_PATTERNS:
+    if len(p) == 3:
+        flags = re.MULTILINE if p[2] else 0
+        COMPILED_PATTERNS.append((re.compile(p[0], flags), p[1]))
+    else:
+        COMPILED_PATTERNS.append((re.compile(p[0], re.MULTILINE), p[1]))
+
+
+def log_blocked(command: str, reason: str):
+    """Append blocked attempt to the log file."""
+    timestamp = datetime.now().isoformat()
+    log_entry = f"[{timestamp}] BLOCKED | Project: {PROJECT_PATH} | Command: {command[:200]} | Reason: {reason}\n"
+    
+    os.makedirs(os.path.dirname(BLOCKED_LOG), exist_ok=True)
+    with open(BLOCKED_LOG, "a") as f:
+        f.write(log_entry)
+
+
+def is_blocked(command: str) -> tuple[bool, str]:
+    """Check if command matches any destructive pattern. Returns (blocked, reason)."""
+    for pattern, reason in COMPILED_PATTERNS:
+        if pattern.search(command):
+            # Special check for DELETE FROM - make sure no WHERE clause exists
+            if "DELETE FROM" in command.upper() and "WHERE" in command.upper():
+                # Re-check more carefully: DELETE FROM X WHERE is OK
+                delete_pattern = re.compile(r"DELETE\s+FROM\s+\w+\s+WHERE\b", re.IGNORECASE)
+                if delete_pattern.search(command):
+                    continue  # Has WHERE, not blocked
+            return True, reason
+    return False, ""
+
+
+def build_response(allowed: bool, blocked_reason: str = "") -> dict:
+    """Build the hook response in Claude Code's expected format."""
+    if allowed:
+        return {"allow": True}
+    else:
+        return {
+            "allow": False,
+            "reason": f"🚫 Blocked: {blocked_reason}\n\nIf you're certain this is safe, you can run it outside Claude Code directly in your terminal.",
+        }
+
+
+def main():
+    try:
+        # Claude Code passes tool call info as JSON via stdin
+        tool_call = json.loads(sys.stdin.read())
+    except (json.JSONDecodeError, EOFError):
+        # If we can't parse, allow by default (fail open for non-destructive)
+        print(json.dumps({"allow": True}))
+        return
+
+    tool_name = tool_call.get("tool_name", "")
+    tool_input = tool_call.get("tool_input", {})
+
+    # We only intercept Bash commands
+    if tool_name != "Bash":
+        print(json.dumps({"allow": True}))
+        return
+
+    command = tool_input.get("command", "")
+    if not command:
+        print(json.dumps({"allow": True}))
+        return
+
+    blocked, reason = is_blocked(command)
+    if blocked:
+        log_blocked(command, reason)
+        print(json.dumps(build_response(False, reason)))
+    else:
+        print(json.dumps(build_response(True)))
+
+
+if __name__ == "__main__":
+    main()
