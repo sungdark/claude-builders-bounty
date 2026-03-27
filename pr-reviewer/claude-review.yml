@@ -1,0 +1,28 @@
+name: Claude PR Reviewer
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Claude Reviewer
+        run: |
+          curl -fsSL https://example.com/install.sh | bash 2>/dev/null || true
+          # Fallback: inline the reviewer script
+          cat << 'SCRIPT' > claude-review.sh
+          # (inline script — use the full version from this repo)
+          SCRIPT
+
+      - name: Run Claude PR Review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          PR_URL="${{ github.event.pull_request.html_url }}"
+          ./claude-review.sh --pr "$PR_URL" > pr-review.md
+          echo "## Claude PR Review" >> $GITHUB_STEP_SUMMARY
+          cat pr-review.md >> $GITHUB_STEP_SUMMARY
