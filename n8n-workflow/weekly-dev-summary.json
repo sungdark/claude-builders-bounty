@@ -1,0 +1,186 @@
+{
+  "name": "Weekly Dev Summary Generator",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cron",
+              "hour": 17,
+              "dayOfWeek": 5
+            }
+          ]
+        }
+      },
+      "id": "schedule-node",
+      "name": "Weekly Trigger (Friday 5pm)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$vars.GITHUB_REPO}}/commits?since={{$vars.LAST_WEEK}}&per_page=100",
+        "options": {
+          "headers": {
+            "Accept": "application/vnd.github.v3+json",
+            "Authorization": "Bearer {{$vars.GITHUB_TOKEN}}"
+          }
+        }
+      },
+      "id": "fetch-commits",
+      "name": "Fetch Weekly Commits",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [500, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{$vars.GITHUB_REPO}}/issues?state=closed&since={{$vars.LAST_WEEK}}&per_page=100",
+        "options": {
+          "headers": {
+            "Accept": "application/vnd.github.v3+json",
+            "Authorization": "Bearer {{$vars.GITHUB_TOKEN}}"
+          }
+        }
+      },
+      "id": "fetch-issues",
+      "name": "Fetch Closed Issues",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [500, 400]
+    },
+    {
+      "parameters": {
+        "url": "={{$vars.GITHUB_REPO}}/pulls?state=closed&since={{$vars.LAST_WEEK}}&per_page=100",
+        "options": {
+          "headers": {
+            "Accept": "application/vnd.github.v3+json",
+            "Authorization": "Bearer {{$vars.GITHUB_TOKEN}}"
+          }
+        }
+      },
+      "id": "fetch-prs",
+      "name": "Fetch Merged PRs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [500, 600]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge all data for Claude\nconst commits = $input.all()[1].json;\nconst issues = $input.all()[2].json;\nconst prs = $input.all()[3].json.filter(pr => pr.merged_at !== null);\n\nconst mergedData = {\n  week_start: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],\n  week_end: new Date().toISOString().split('T')[0],\n  commits: commits.map(c => ({ sha: c.sha, message: c.commit.message, author: c.commit.author.name })),\n  closed_issues: issues.map(i => ({ number: i.number, title: i.title, labels: i.labels.map(l => l.name) })),\n  merged_prs: prs.map(pr => ({ number: pr.number, title: pr.title, author: pr.user.login }))\n};\n\nreturn [{ json: mergedData }];"
+      },
+      "id": "merge-data",
+      "name": "Merge Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [750, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "{{$vars.ANTHROPIC_API_KEY}}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "claude-sonnet-4-20250514"
+            },
+            {
+              "name": "max_tokens",
+              "value": 1024
+            },
+            {
+              "name": "system",
+              "value": "You are a developer newsletter writer. Given a week's worth of GitHub activity (commits, issues, PRs), write a concise, engaging 3-4 paragraph narrative summary in {{$vars.LANGUAGE}} suitable for a dev team. Highlight key achievements, bug fixes, and notable changes. Use a friendly but professional tone."
+            },
+            {
+              "name": "messages",
+              "value": "[{\"role\": \"user\", \"content\": \"Summarize this week's activity:\\n{{ $json }}\"}]"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "claude-api",
+      "name": "Call Claude API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1000, 400]
+    },
+    {
+      "parameters": {
+        "webhookUri": "{{$vars.DISCORD_WEBHOOK}}",
+        "data": "={{ { \"content\": \"📋 **Weekly Dev Summary** \\n\\n\" + $json.content[0].text } }}",
+        "options": {}
+      },
+      "id": "discord-notify",
+      "name": "Notify Discord",
+      "type": "n8n-nodes-base.discordTrigger",
+      "position": [1250, 400],
+      "webhookId": "weekly-dev-summary"
+    }
+  ],
+  "connections": {
+    "Weekly Trigger (Friday 5pm)": {
+      "main": [
+        [{ "node": "Fetch Weekly Commits", "type": "main", "index": 0 }],
+        [{ "node": "Fetch Closed Issues", "type": "main", "index": 0 }],
+        [{ "node": "Fetch Merged PRs", "type": "main", "index": 0 }]
+      ]
+    },
+    "Fetch Weekly Commits": {
+      "main": [[{ "node": "Merge Data", "type": "main", "index": 0 }]]
+    },
+    "Fetch Closed Issues": {
+      "main": [[{ "node": "Merge Data", "type": "main", "index": 0 }]]
+    },
+    "Fetch Merged PRs": {
+      "main": [[{ "node": "Merge Data", "type": "main", "index": 0 }]]
+    },
+    "Merge Data": {
+      "main": [[{ "node": "Call Claude API", "type": "main", "index": 0 }]]
+    },
+    "Call Claude API": {
+      "main": [[{ "node": "Notify Discord", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [],
+  "variables": {
+    "GITHUB_REPO": "https://api.github.com/repos/YOUR_ORG/YOUR_REPO",
+    "GITHUB_TOKEN": "ghp_xxx",
+    "ANTHROPIC_API_KEY": "sk-ant-xxx",
+    "DISCORD_WEBHOOK": "https://discord.com/api/webhooks/xxx",
+    "LANGUAGE": "EN",
+    "LAST_WEEK": "{{ Date.now() - 7 * 24 * 60 * 60 * 1000 }}"
+  },
+  "meta": {
+    "templateCredsSetup": false,
+    "templateId": "weekly-dev-summary"
+  }
+}
