@@ -1,42 +1,43 @@
 #!/usr/bin/env python3
 """
-Claude Code Pre-Tool-Use Hook: Blocks destructive bash commands
+Claude Code Pre-Tool-Use Hook: Blocks destructive bash commands.
 Install to: ~/.claude/hooks/pre_tool_use.py
 
-Usage in settings.json:
-{
-  "hooks": {
-    "pre_tool_use": "python3 ~/.claude/hooks/pre_tool_use.py"
-  }
-}
+Claude Code passes JSON to hooks via stdin:
+  {"tool": "Bash", "params": {"command_line": "ls -la"}, "context": {...}}
 
-Blocks: rm -rf, DROP TABLE, TRUNCATE, git push --force, DELETE without WHERE
-Logs all blocked attempts to ~/.claude/hooks/blocked.log
+Hook must output JSON to stdout:
+  {"allow": true}   — allow the command
+  {"allow": false, "report": "reason"}  — block the command
 """
 
+import json
 import os
 import re
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
+# Patterns that are always dangerous, regardless of path
 BLOCKED_PATTERNS = [
-    (r'rm\s+-rf\s+/(?:\S*)', "rm -rf / (root deletion)"),
-    (r'\bDROP\s+TABLE\b', "DROP TABLE (deletes entire table)"),
-    (r'\bTRUNCATE\s+TABLE\b', "TRUNCATE TABLE (removes all rows)"),
-    (r'git\s+push\s+.*--force\b', "git push --force (overwrites remote history)"),
-    (r'git\s+push\s+.*-f\b', "git push -f (overwrites remote history)"),
-    (r'DELETE\s+FROM\s+\w+\s*(?:;|\s*$)', "DELETE FROM without WHERE clause"),
-    (r'\bdd\b.*of=/dev/', "dd writing to block device"),
-    (r'\bmkfs\b', "mkfs (formats filesystem)"),
-    (r'>\s*/dev/(?:sd|hd|nvme)', "direct block device write"),
+    (re.compile(r'rm\s+-rf\s+/\S*'),              "rm -rf / — root deletion"),
+    (re.compile(r'\bDROP\s+TABLE\b', re.IGNORECASE), "DROP TABLE — deletes entire table"),
+    (re.compile(r'\bTRUNCATE\s+TABLE\b', re.IGNORECASE), "TRUNCATE TABLE — removes all rows"),
+    (re.compile(r'git\s+push\s+.*--force\b'),      "git push --force — overwrites remote history"),
+    (re.compile(r'git\s+push\s+.*\s-f\b'),           "git push -f — overwrites remote history"),
+    (re.compile(r'DELETE\s+FROM\s+\w+\s*(?:;|\s*$)', re.IGNORECASE), "DELETE FROM without WHERE — deletes all rows"),
+    (re.compile(r'\bdd\b.*of=/dev/'),               "dd writing to block device"),
+    (re.compile(r'\bmkfs\b'),                        "mkfs — formats a filesystem"),
+    (re.compile(r'>\s*/dev/(?:sd|hd|nvme)'),        "direct block device write"),
+    (re.compile(r':\s*>\s*/dev/(?:sd|hd|nvme)'),   "redirect output to block device"),
 ]
 
 BLOCKED_LOG = Path.home() / ".claude" / "hooks" / "blocked.log"
 
 
 def get_project_path() -> str:
+    """Get the git project root for the current directory."""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
@@ -49,45 +50,49 @@ def get_project_path() -> str:
     return os.getcwd()
 
 
-def log_blocked(command: str, project: str):
+def log_blocked(command: str, project: str, reason: str):
+    """Append a blocked attempt to the blocked.log file."""
     BLOCKED_LOG.parent.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat()
     with open(BLOCKED_LOG, "a") as f:
-        f.write(f"[{timestamp}] BLOCKED in {project}: {command}\n")
+        f.write(f"[{timestamp}] BLOCKED in {project}: {command}\n  Reason: {reason}\n")
 
 
 def check_command(command: str) -> tuple[bool, str]:
-    for pattern, name in BLOCKED_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            msg = f"🚫 BLOCKED: {name}"
-            return True, msg
+    """Check if a command matches any blocked pattern. Returns (blocked, reason)."""
+    for pattern, reason in BLOCKED_PATTERNS:
+        if pattern.search(command):
+            return True, reason
     return False, ""
 
 
 def main():
-    # argv[0] = script path
-    # argv[1] = tool name (e.g., "Bash")
-    # argv[2:] = tool arguments (for Bash, argv[2] is the command string)
-    if len(sys.argv) < 2:
-        sys.exit(0)
+    # Read Claude Code's JSON payload from stdin
+    try:
+        payload = json.loads(sys.stdin.read())
+    except (json.JSONDecodeError, OSError):
+        # If we can't read stdin, allow by default (pass through)
+        print(json.dumps({"allow": True}))
+        return
 
-    tool = sys.argv[1]
+    tool = payload.get("tool", "")
     if tool != "Bash":
-        sys.exit(0)
+        # Only intercept Bash commands
+        print(json.dumps({"allow": True}))
+        return
 
-    # The full command string is in argv[2] for Bash tool
-    command = sys.argv[2] if len(sys.argv) > 2 else ""
+    params = payload.get("params", {})
+    command_line = params.get("command_line", "")
 
-    blocked, msg = check_command(command)
+    blocked, reason = check_command(command_line)
 
     if blocked:
         project = get_project_path()
-        log_blocked(command, project)
-        print(msg, file=sys.stderr)
-        print(f"📋 Logged to: {BLOCKED_LOG}", file=sys.stderr)
-        sys.exit(1)  # non-zero = block
-
-    sys.exit(0)  # zero = allow
+        log_blocked(command_line, project, reason)
+        report = f"🚫 BLOCKED: {reason}\n📋 Logged to: {BLOCKED_LOG}"
+        print(json.dumps({"allow": False, "report": report}))
+    else:
+        print(json.dumps({"allow": True}))
 
 
 if __name__ == "__main__":
