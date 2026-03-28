@@ -1,0 +1,32 @@
+name: "Claude PR Review"
+description: "Analyzes a GitHub PR diff and posts a structured review comment using Claude Code."
+author: "Claude Builders Bounty"
+inputs:
+  pr-url:
+    description: "Pull Request URL to review"
+    required: false
+  github-token:
+    description: "GitHub token (use secrets.GITHUB_TOKEN)"
+    required: true
+    default: ${{ github.token }}
+
+runs:
+  using: composite
+  steps:
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: "20"
+        registry-url: "https://registry.npmjs.org"
+
+    - name: Install claude-review
+      shell: bash
+      run: npm install -g .
+
+    - name: Run PR Review
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+      run: |
+        URL="${{ inputs.pr-url || github.event.pull_request.html_url }}"
+        claude-review --pr "$URL"

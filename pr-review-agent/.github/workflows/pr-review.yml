@@ -1,0 +1,50 @@
+name: Claude PR Review Agent
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_url:
+        description: "Pull Request URL (e.g. https://github.com/owner/repo/pull/123)"
+        required: true
+        type: string
+  pull_request:
+    types: [opened, synchronize, reopened]
+  pull_request_review:
+    types: [submitted]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install claude-review
+        run: npm install -g .
+        working-directory: ./pr-review-agent
+
+      - name: Run PR Review
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          claude-review --pr "${{ inputs.pr_url || github.event.pull_request.html_url }}"
+        working-directory: ./pr-review-agent
+
+      - name: Comment with review result
+        env:
+          REVIEW_OUTPUT: ${{ steps.review.outputs.comment }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -n "$REVIEW_OUTPUT" ]; then
+            gh pr comment "${{ github.event.pull_request.number }}" --body "$REVIEW_OUTPUT"
+          fi

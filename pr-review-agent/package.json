@@ -1,0 +1,20 @@
+{
+  "name": "claude-review",
+  "version": "1.0.0",
+  "description": "Claude Code sub-agent that reviews a PR and posts a structured comment",
+  "type": "module",
+  "bin": {
+    "claude-review": "./claude-review"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "claude-review",
+    "README.md",
+    "action.yml"
+  ],
+  "scripts": {
+    "test": "node claude-review --help"
+  }
+}
