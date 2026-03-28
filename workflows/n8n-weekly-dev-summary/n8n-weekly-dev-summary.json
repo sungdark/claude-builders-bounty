@@ -1,0 +1,248 @@
+{
+  "name": "GitHub Weekly Dev Summary with Claude",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "triggerAtHour": 17,
+              "triggerAtMinute": 0,
+              "weekday": 5
+            }
+          ]
+        }
+      },
+      "id": "node-schedule",
+      "name": "Weekly Trigger (Friday 5pm)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [100, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$vars.GITHUB_REPO}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "node-github-repo",
+      "name": "Get Repo Info",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [320, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$vars.GITHUB_REPO}}/compare/{{$vars.LAST_SUMMARIES_BRANCH}}...main",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "node-github-commits",
+      "name": "Get Weekly Commits",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [540, 100]
+    },
+    {
+      "parameters": {
+        "url": "={{$vars.GITHUB_REPO}}/issues?state=closed&since={{$vars.LAST_WEEK_UNIX}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "node-github-issues",
+      "name": "Get Closed Issues (Past Week)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [540, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$vars.GITHUB_REPO}}/pulls?state=closed&per_page=50",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "node-github-prs",
+      "name": "Get Merged PRs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [540, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format GitHub data for Claude\nconst commits = $input.all()[2].json;\nconst issues = $input.all()[3].json;\nconst prs = $input.all()[4].json;\n\nconst repoName = $vars.GITHUB_REPO.split('/').pop();\nconst weekStart = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];\nconst weekEnd = new Date().toISOString().split('T')[0];\n\nconst commitList = Array.isArray(commits) ? commits.map(c => `- ${c.commit.message.split('\\n')[0]} (@${c.commit.author.name})`).join('\\n') : 'No commits this week.';\nconst issueList = Array.isArray(issues) ? issues.filter(i => !i.pull_request).map(i => `- #${i.number} ${i.title} (closed ${new Date(i.closed_at).toLocaleDateString()})`).join('\\n') : 'No issues closed.';\nconst mergedThisWeek = Array.isArray(prs) ? prs.filter(p => p.merged_at && new Date(p.merged_at) > new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)) : [];\nconst prList = mergedThisWeek.length > 0 ? mergedThisWeek.map(pr => `- #${pr.number} ${pr.title} (merged ${new Date(pr.merged_at).toLocaleDateString()})`).join('\\n') : 'No PRs merged this week.';\n\nconst prompt = `Write a 3-4 paragraph narrative summary of this week's development activity for the ${repoName} repository.\\n\\n**Week:** ${weekStart} to ${weekEnd}\\n\\n**Commits this week:**\\n${commitList}\\n\\n**Issues closed this week:**\\n${issueList}\\n\\n**PRs merged this week:**\\n${prList}\\n\\nWrite in a clear, professional tone. Highlight major features, bug fixes, and any significant architectural changes. End with a brief outlook for the next week.\\n\\nLanguage: ${$vars.LANGUAGE || 'EN'}`;\n\nreturn [{ json: { prompt, repo: repoName, weekStart, weekEnd, commitCount: Array.isArray(commits) ? commits.length : 0, issueCount: Array.isArray(issues) ? issues.length : 0, prCount: mergedThisWeek.length } }];"
+      },
+      "id": "node-format-prompt",
+      "name": "Format Prompt for Claude",
+      "type": "n8n-nodes-base.codeNode",
+      "typeVersion": 2,
+      "position": [760, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{$vars.ANTHROPIC_API_KEY}}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "claude-sonnet-4-20250514"
+            },
+            {
+              "name": "max_tokens",
+              "value": 1024
+            },
+            {
+              "name": "messages",
+              "value": "=[{\"role\": \"user\", \"content\": \"{{ $json.prompt }}\"}]"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "node-claude-api",
+      "name": "Claude API - Generate Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [980, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract Claude's response and format for Discord\nconst input = $input.first().json;\nconst content = input.content && input.content[0] && input.content[0].text;\nconst fmtData = $('Format Prompt for Claude').first().json;\n\nconst summary = content || 'Summary generation failed — check API key and quota.';\n\nconst embed = {\n  title: `Weekly Dev Summary — ${fmtData.repo}`,\n  description: summary,\n  color: 5814783,\n  footer: {\n    text: `Week: ${fmtData.weekStart} → ${fmtData.weekEnd} | ${fmtData.commitCount} commits | ${fmtData.issueCount} issues | ${fmtData.prCount} PRs merged`\n  },\n  timestamp: new Date().toISOString()\n};\n\nreturn [{ json: { content: '', embeds: [embed] } }];"
+      },
+      "id": "node-format-output",
+      "name": "Format Discord Embed",
+      "type": "n8n-nodes-base.codeNode",
+      "typeVersion": 2,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{$vars.DISCORD_WEBHOOK_URL}}",
+        "method": "POST",
+        "sendBody": true,
+        "bodyContentType": "json",
+        "specifyBody": "json",
+        "jsonOutput": "={{ $json }}",
+        "options": {}
+      },
+      "id": "node-discord-webhook",
+      "name": "Send to Discord",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1420, 300]
+    }
+  ],
+  "connections": {
+    "Weekly Trigger (Friday 5pm)": {
+      "main": [
+        [
+          { "node": "Get Repo Info", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Get Repo Info": {
+      "main": [
+        [
+          { "node": "Get Weekly Commits", "type": "main", "index": 0 },
+          { "node": "Get Closed Issues (Past Week)", "type": "main", "index": 0 },
+          { "node": "Get Merged PRs", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Get Weekly Commits": {
+      "main": [
+        [
+          { "node": "Format Prompt for Claude", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Get Closed Issues (Past Week)": {
+      "main": [
+        [
+          { "node": "Format Prompt for Claude", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Get Merged PRs": {
+      "main": [
+        [
+          { "node": "Format Prompt for Claude", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Format Prompt for Claude": {
+      "main": [
+        [
+          { "node": "Claude API - Generate Summary", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Claude API - Generate Summary": {
+      "main": [
+        [
+          { "node": "Format Discord Embed", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Format Discord Embed": {
+      "main": [
+        [
+          { "node": "Send to Discord", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": [],
+  "updatedAt": "2026-03-28T08:35:00.000Z",
+  "versionId": "1"
+}
