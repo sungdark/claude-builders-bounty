@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# pre-tool-use — Claude Code hook that intercepts dangerous commands
+# Blocks: rm -rf, DROP TABLE, git push --force, TRUNCATE, DELETE FROM without WHERE
+# Logs to ~/.claude/hooks/blocked.log
+
+HOOK_LOG="$HOME/.claude/hooks/blocked.log"
+mkdir -p "$(dirname "$HOOK_LOG")"
+
+# Read JSON input from Claude Code
+read -r input
+
+# Extract the command/tool arguments from JSON
+# We look for bash commands in the input
+COMMAND=$(echo "$input" | grep -o '"command":"[^"]*"' | head -1 | sed 's/"command":"//;s/"$//')
+TOOL=$(echo "$input" | grep -o '"tool":"[^"]*"' | head -1 | sed 's/"tool":"//;s/"$//')
+
+# Only apply to bash commands
+if [[ "$TOOL" != "Bash" && "$TOOL" != "bash" ]]; then
+  exit 0
+fi
+
+# Empty command
+[[ -z "$COMMAND" ]] && exit 0
+
+# Normalize: lowercase for pattern matching
+LOWER_CMD=$(echo "$COMMAND" | tr '[:upper:]' '[:lower:]' | xargs)
+
+# Get the project path (if available)
+PROJECT_PATH="${PROJECT_PATH:-$(pwd)}"
+
+# Check for dangerous patterns
+DANGEROUS=""
+
+# 1. rm -rf / or rm -rf ~ or rm -rf $HOME (unrestricted destruction)
+if echo "$LOWER_CMD" | grep -qE "rm\s+-rf\s+[/~$]"; then
+  DANGEROUS="rm -rf on root, home, or HOME directory"
+fi
+
+# 2. DROP TABLE (SQL destruction)
+if echo "$LOWER_CMD" | grep -qE "drop\s+table"; then
+  DANGEROUS="DROP TABLE SQL command"
+fi
+
+# 3. TRUNCATE
+if echo "$LOWER_CMD" | grep -qE "truncate\s+"; then
+  DANGEROUS="TRUNCATE SQL command"
+fi
+
+# 4. git push --force (only dangerous with --force or --force-with-lease)
+if echo "$LOWER_CMD" | grep -qE "git\s+push.*--force"; then
+  DANGEROUS="git push --force (rewrites remote history)"
+fi
+
+# 5. DELETE FROM without WHERE clause
+if echo "$LOWER_CMD" | grep -qE "delete\s+from" && ! echo "$LOWER_CMD" | grep -qE "delete\s+from.*where"; then
+  DANGEROUS="DELETE FROM without WHERE clause"
+fi
+
+# If dangerous command detected, block it
+if [[ -n "$DANGEROUS" ]]; then
+  TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+  echo "[$TIMESTAMP] BLOCKED: '$COMMAND' | Reason: $DANGEROUS | Project: $PROJECT_PATH" >> "$HOOK_LOG"
+  
+  # Output JSON to block the command and show message to Claude
+  cat <<EOF
+{"blocked": true, "reason": "⚠️  HOOK BLOCKED: $DANGEROUS\n\nThis command was blocked by the Claude Code security hook.\nIf you believe this is a false positive, you can:\n1. Ask the user to confirm they want to proceed\n2. Run the command outside of Claude Code\n\nLogged to: $HOOK_LOG"}
+EOF
+  exit 1
+fi
+
+exit 0
