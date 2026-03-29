@@ -1,0 +1,13 @@
+{
+  "name": "claude-review-agent",
+  "version": "1.0.0",
+  "description": "AI-powered PR review agent that analyzes diffs and posts structured comments",
+  "bin": {
+    "claude-review": "./index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": ["github", "pr", "review", "claude", "agent"],
+  "license": "MIT"
+}
