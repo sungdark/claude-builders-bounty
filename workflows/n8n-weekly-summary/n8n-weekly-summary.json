@@ -1,0 +1,209 @@
+{
+  "name": "Weekly Dev Summary - Claude + n8n",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 17 * * 5"
+            }
+          ]
+        }
+      },
+      "id": "cron-trigger",
+      "name": "Weekly Trigger (Friday 5PM UTC)",
+      "type": "n8n-nodes-base.cronTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{$vars.GITHUB_REPO}}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          }
+        }
+      },
+      "id": "github-commits",
+      "name": "Get Weekly Commits",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [220, -120],
+      "credentials": {
+        "httpHeaderAuth": "github-default"
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{$vars.GITHUB_REPO}}",
+        "options": {
+          "response": {
+            "responseFormat": "json"
+          }
+        }
+      },
+      "id": "github-issues",
+      "name": "Get Closed Issues",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "url": "={{$vars.GITHUB_REPO}}",
+        "options": {
+          "response": {
+            "responseFormat": "json"
+          }
+        }
+      },
+      "id": "github-prs",
+      "name": "Get Merged PRs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [220, 120]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge all GitHub data\nconst commits = $input.all();\nconst issues = $input.all();\nconst prs = $input.all();\n\nconst githubRepo = $vars.GITHUB_REPO || 'owner/repo';\nconst language = $vars.LANGUAGE || 'EN';\n\nconst dayOffset = parseInt($vars.DAY_OFFSET || '7');\nconst since = new Date();\nsince.setDate(since.getDate() - dayOffset);\nconst sinceStr = since.toISOString().split('T')[0];\n\nreturn {\n  json: {\n    repo: githubRepo,\n    period: `Last ${dayOffset} days (since ${sinceStr})`,\n    commits: commits,\n    issues: issues,\n    prs: prs,\n    language: language\n  }\n};"
+      },
+      "id": "merge-data",
+      "name": "Merge Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.anthropic.com/v1/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-api-key",
+              "value": "={{$vars.ANTHROPIC_API_KEY}}"
+            },
+            {
+              "name": "anthropic-version",
+              "value": "2023-06-01"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "model",
+              "value": "claude-sonnet-4-20250514"
+            },
+            {
+              "name": "max_tokens",
+              "value": 1024
+            },
+            {
+              "name": "system",
+              "value": "You are a developer advocate summarizing weekly code activity. Write in a concise, engaging narrative style. Output in the user's language ({{$vars.LANGUAGE || 'EN'}})."
+            },
+            {
+              "name": "messages",
+              "value": [
+                {
+                  "role": "user",
+                  "content": "Summarize this week's GitHub activity:\n\nRepo: {{$json.repo}}\nPeriod: {{$json.period}}\n\nCommits:\n{{$json.commits}}\n\nClosed Issues:\n{{$json.issues}}\n\nMerged PRs:\n{{$json.prs}}\n\nFormat: Markdown with sections for Commits, Issues, PRs, and a Narrative Summary."
+                }
+              ]
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "responseFormat": "json"
+          }
+        }
+      },
+      "id": "claude-api",
+      "name": "Claude API - Generate Summary",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "webhookUri": "={{$vars.WEBHOOK_URL}}",
+        "data": {
+          "content": "📊 **Weekly Dev Summary** — `{{$json.repo}}`\n{{$json.summary}}"
+        }
+      },
+      "id": "discord-webhook",
+      "name": "Discord Notification",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 1,
+      "position": [880, 0]
+    }
+  ],
+  "connections": {
+    "Weekly Trigger (Friday 5PM UTC)": {
+      "main": [
+        [
+          {
+            "node": "Get Weekly Commits",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Closed Issues",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Merged PRs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge Data": {
+      "main": [
+        [
+          {
+            "node": "Claude API - Generate Summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Claude API - Generate Summary": {
+      "main": [
+        [
+          {
+            "node": "Discord Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticVariables": {
+    "GITHUB_REPO": "anthropic/claude-code",
+    "LANGUAGE": "EN",
+    "DAY_OFFSET": "7"
+  }
+}
