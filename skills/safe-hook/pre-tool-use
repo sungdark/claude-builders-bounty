@@ -1,0 +1,68 @@
+#!/bin/bash
+# Claude Code pre-tool-use hook — blocks destructive commands
+# Install: place at ~/.claude/hooks/pre-tool-use
+# Part of: https://github.com/sungdark/claude-builders-bounty (Bounty #3)
+
+HOOK_LOG="${HOME}/.claude/hooks/blocked.log"
+
+BLOCKED_COMMANDS=(
+  "rm -rf"
+  "DROP TABLE"
+  "TRUNCATE"
+  "git push --force"
+  "git push -f"
+  "--force-with-lease"
+  "chmod -R 777"
+  ":(){:|:&};"
+  "> /dev/sda"
+  "dd if="
+  "mkfs"
+  "shred -u"
+)
+
+BLOCKED=false
+BLOCKED_PATTERN=""
+# Claude Code passes tool input as first argument (JSON string)
+INPUT_DATA="${1:-}"
+
+for pattern in "${BLOCKED_COMMANDS[@]}"; do
+  if echo "$INPUT_DATA" | grep -qiF "$pattern"; then
+    BLOCKED=true
+    BLOCKED_PATTERN="$pattern"
+    break
+  fi
+done
+
+# Check for DELETE FROM without WHERE clause
+if echo "$INPUT_DATA" | grep -Pqi "delete\s+from\s+[^;]*\s*(;?\s*)$"; then
+  # More precise check: must have WHERE or be multi-statement
+  if ! echo "$INPUT_DATA" | grep -Pqi "delete\s+from\s+[^;]*where"; then
+    BLOCKED=true
+    BLOCKED_PATTERN="DELETE FROM without WHERE clause"
+  fi
+fi
+
+if [ "$BLOCKED" = true ]; then
+  TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+  PROJECT=$(git rev-parse --show-toplevel 2>/dev/null | xargs basename 2>/dev/null || echo "unknown")
+  COMMAND=$(echo "$INPUT_DATA" | tr '\n' ' ' | cut -c1-300)
+
+  mkdir -p "$(dirname "$HOOK_LOG")"
+  echo "[$TIMESTAMP] BLOCKED: $BLOCKED_PATTERN | Project: $PROJECT | Command: $COMMAND" >> "$HOOK_LOG"
+
+  echo ""
+  echo "🚫 HOOK BLOCKED: $BLOCKED_PATTERN"
+  echo ""
+  echo "This command was blocked by the Claude Code Safe Hook."
+  echo ""
+  echo "If you need to run this command:"
+  echo "  1. Add --dry-run to preview first"
+  echo "  2. Disable hook: mv ~/.claude/hooks/pre-tool-use ~/.claude/hooks/pre-tool-use.disabled"
+  echo "  3. Add a note explaining why this is necessary"
+  echo ""
+  echo "Incident logged: $HOOK_LOG"
+  echo ""
+  exit 1
+fi
+
+exit 0
