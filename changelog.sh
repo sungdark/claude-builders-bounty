@@ -1,162 +1,150 @@
 #!/bin/bash
-#============================================================
-# changelog.sh — Generate CHANGELOG.md from git history
-# Usage: bash changelog.sh [--from-tag <tag>] [--output <file>]
-#============================================================
+# changelog.sh — Generate a structured CHANGELOG.md from git history
+# Usage: bash changelog.sh [--since-tag <tag>] [--output <file>]
 
-OUTPUT_FILE="${OUTPUT_FILE:-CHANGELOG.md}"
+set -euo pipefail
+
+OUTPUT="CHANGELOG.md"
 SINCE_TAG=""
 
-# Parse args
+# Parse arguments
 while [[ $# -gt 0 ]]; do
-  case $1 in
-    --from-tag) SINCE_TAG="$2"; shift 2 ;;
-    --output) OUTPUT_FILE="$2"; shift 2 ;;
-    *) echo "Unknown option: $1"; exit 1 ;;
-  esac
+    case $1 in
+        --since-tag)
+            SINCE_TAG="$2"
+            shift 2
+            ;;
+        --output)
+            OUTPUT="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: $0 [--since-tag <tag>] [--output <file>]"
+            exit 1
+            ;;
+    esac
 done
 
-# Check git repo
-if ! git rev-parse --git-dir > /dev/null 2>&1; then
-  echo "Error: Not a git repository"
-  exit 1
-fi
-
-# Detect last tag
-if [[ -z "$SINCE_TAG" ]]; then
-  SINCE_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+# Verify we're in a git repo
+if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    echo "Error: Not a git repository"
+    exit 1
 fi
 
 # Determine range
 if [[ -n "$SINCE_TAG" ]]; then
-  RANGE="$SINCE_TAG..HEAD"
-  SECTION_HEADER="## [$SINCE_TAG]"
+    if ! git rev-parse "$SINCE_TAG" > /dev/null 2>&1; then
+        echo "Error: Tag '$SINCE_TAG' not found"
+        exit 1
+    fi
+    RANGE="$SINCE_TAG..HEAD"
 else
-  RANGE="--all"
-  SINCE_TAG="Unreleased"
-  SECTION_HEADER="## [Unreleased]"
+    LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+    if [[ -n "$LAST_TAG" ]]; then
+        RANGE="$LAST_TAG..HEAD"
+    else
+        RANGE="--all"
+    fi
 fi
 
-# Temp files for categorized commits
-TMP_ADDED=$(mktemp)
-TMP_FIXED=$(mktemp)
-TMP_CHANGED=$(mktemp)
-TMP_REMOVED=$(mktemp)
-trap 'rm -f "$TMP_ADDED" "$TMP_FIXED" "$TMP_CHANGED" "$TMP_REMOVED"' EXIT
+# Fetch commits — use null byte as separator (printf %s\0 for safety)
+# git log --format with %s and %h separated by a sentinel
+mapfile -t LINES < <(git log "$RANGE" --pretty=format:"%s%GFG%gh%GFG" 2>/dev/null || true)
 
-# Categorize a commit message
-categorize() {
-  local msg="$1"
-  local lower_msg
-  lower_msg=$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]')
-
-  if printf '%s' "$lower_msg" | grep -qE '(add|feat|new|introduce|create|init|implement)'; then
-    echo "ADDED"
-  elif printf '%s' "$lower_msg" | grep -qE '(fix|bug|patch|repair|correct|hotfix|resolve)'; then
-    echo "FIXED"
-  elif printf '%s' "$lower_msg" | grep -qE '(remove|delete|drop|deprecate|uninstall|cleanup)[[:space:]]'; then
-    echo "REMOVED"
-  else
-    echo "CHANGED"
-  fi
-}
-
-# Collect commits
-echo "Generating changelog from: ${RANGE}..."
-
-git log "$RANGE" --pretty=format:"%s" 2>/dev/null | while IFS= read -r subject; do
-  # Skip merge commits
-  case "$subject" in Merge*) continue ;; esac
-  # Skip empty
-  [[ -z "$subject" ]] && continue
-
-  local category
-  category=$(categorize "$subject")
-  local entry
-  entry="- $subject"
-
-  case "$category" in
-    ADDED)   echo "$entry" >> "$TMP_ADDED" ;;
-    FIXED)   echo "$entry" >> "$TMP_FIXED" ;;
-    CHANGED) echo "$entry" >> "$TMP_CHANGED" ;;
-    REMOVED) echo "$entry" >> "$TMP_REMOVED" ;;
-  esac
-done
-
-# Check if we have any changes
-if [[ ! -s "$TMP_ADDED" && ! -s "$TMP_FIXED" && ! -s "$TMP_CHANGED" && ! -s "$TMP_REMOVED" ]]; then
-  echo "No commits found in range: $RANGE"
-  exit 2
+if [[ ${#LINES[@]} -eq 0 ]]; then
+    echo "No commits found in range"
+    exit 0
 fi
 
-# Sort and deduplicate
-sort_dedup() {
-  local file="$1"
-  if [[ ! -s "$file" ]]; then
-    return
-  fi
-  sort "$file" | uniq
-}
+# Sentinel to split msg from hash
+SENTINEL="<<<GITSPLIT>>>"
 
-# Count lines
-count_lines() {
-  local file="$1"
-  if [[ ! -s "$file" ]]; then
-    echo 0
-  else
-    wc -l < "$file" | tr -d ' '
-  fi
-}
+# Re-fetch with a better delimiter approach using process substitution
+COMMITS=$(git log "$RANGE" --format="COMMITBEGIN%sCOMMITEND%h" 2>/dev/null || echo "")
 
-NUM_ADDED=$(count_lines "$TMP_ADDED")
-NUM_FIXED=$(count_lines "$TMP_FIXED")
-NUM_CHANGED=$(count_lines "$TMP_CHANGED")
-NUM_REMOVED=$(count_lines "$TMP_REMOVED")
+# Initialize categorized associative array
+declare -A ITEMS
+ITEMS[Added]=""
+ITEMS[Fixed]=""
+ITEMS[Changed]=""
+ITEMS[Removed]=""
+ITEMS[Security]=""
+ITEMS[Other]=""
 
-# Generate changelog
+# Parse commits using sed
+while IFS= read -r line; do
+    # Split on COMMITBEGIN / COMMITEND
+    msg=$(echo "$line" | sed 's/COMMITBEGIN\(.*\)COMMITEND.*/\1/')
+    hash=$(echo "$line" | sed 's/.*COMMITEND//')
+    
+    [[ -z "$msg" ]] && continue
+
+    category="Other"
+    lc_msg=$(echo "$msg" | tr '[:upper:]' '[:lower:]')
+
+    case "$lc_msg" in
+        feat:*|feature:*|add:*|new:*)
+            category="Added"
+            ;;
+        fix:*|bugfix:*|patch:*|hotfix:*)
+            category="Fixed"
+            ;;
+        refactor:*|perf:*|optimize:*|improve:*|chore:*|style:*|format:*)
+            category="Changed"
+            ;;
+        remove:*|delete:*|deprecate:*|drop:*)
+            category="Removed"
+            ;;
+        security:*|sec:*)
+            category="Security"
+            ;;
+        docs:*|doc:*|test:*|tests:*|ci:*|build:*)
+            category="Changed"
+            ;;
+    esac
+
+    line_formatted="- $msg (#$hash)"
+    if [[ -n "${ITEMS[$category]}" ]]; then
+        ITEMS[$category]="${line_formatted}"$'\n'"${ITEMS[$category]}"
+    else
+        ITEMS[$category]="$line_formatted"
+    fi
+done < <(echo "$COMMITS")
+
+# Determine version header
+CURRENT_DATE=$(date "+%Y-%m-%d")
+if [[ -n "${LAST_TAG:-}" ]]; then
+    VERSION_HEADER="${LAST_TAG#v} - $CURRENT_DATE"
+else
+    VERSION_HEADER="Unreleased"
+fi
+
+# Write changelog
 {
-  echo "# Changelog"
-  echo ""
-  echo "All notable changes to this project will be documented in this file."
-  echo ""
-  echo "This changelog is automatically generated by \`changelog.sh\`."
-  echo ""
-  echo "$SECTION_HEADER"
-  echo ""
-  
-  if [[ -s "$TMP_ADDED" ]]; then
-    echo "### Added"
+    echo "# Changelog"
     echo ""
-    sort_dedup "$TMP_ADDED"
+    echo "All notable changes to this project will be documented in this file."
     echo ""
-  fi
-  
-  if [[ -s "$TMP_FIXED" ]]; then
-    echo "### Fixed"
+    echo "## [$VERSION_HEADER]"
     echo ""
-    sort_dedup "$TMP_FIXED"
-    echo ""
-  fi
-  
-  if [[ -s "$TMP_CHANGED" ]]; then
-    echo "### Changed"
-    echo ""
-    sort_dedup "$TMP_CHANGED"
-    echo ""
-  fi
-  
-  if [[ -s "$TMP_REMOVED" ]]; then
-    echo "### Removed"
-    echo ""
-    sort_dedup "$TMP_REMOVED"
-    echo ""
-  fi
-} > "$OUTPUT_FILE"
 
-echo "✅ CHANGELOG.md generated: $OUTPUT_FILE"
-echo ""
-echo "Summary:"
-echo "  Added:   $NUM_ADDED"
-echo "  Fixed:   $NUM_FIXED"
-echo "  Changed: $NUM_CHANGED"
-echo "  Removed: $NUM_REMOVED"
+    for cat in "Added" "Fixed" "Changed" "Removed" "Security"; do
+        content="${ITEMS[$cat]}"
+        if [[ -n "$content" ]]; then
+            echo "### $cat"
+            echo "$content"
+            echo ""
+        fi
+    done
+
+    other="${ITEMS[Other]}"
+    if [[ -n "$other" ]]; then
+        echo "### Other"
+        echo "$other"
+        echo ""
+    fi
+
+} > "$OUTPUT"
+
+echo "Changelog written to $OUTPUT"
