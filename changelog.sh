@@ -4,11 +4,8 @@
 # Usage: bash changelog.sh [--from-tag <tag>] [--output <file>]
 #============================================================
 
-set -euo pipefail
-
 OUTPUT_FILE="${OUTPUT_FILE:-CHANGELOG.md}"
 SINCE_TAG=""
-PROJECT_NAME=$(basename "$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")")
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -40,22 +37,25 @@ else
   SECTION_HEADER="## [Unreleased]"
 fi
 
-# Category arrays
-declare -A ADDED FIXED CHANGED REMOVED
+# Temp files for categorized commits
+TMP_ADDED=$(mktemp)
+TMP_FIXED=$(mktemp)
+TMP_CHANGED=$(mktemp)
+TMP_REMOVED=$(mktemp)
+trap 'rm -f "$TMP_ADDED" "$TMP_FIXED" "$TMP_CHANGED" "$TMP_REMOVED"' EXIT
 
 # Categorize a commit message
 categorize() {
   local msg="$1"
-  local lower_msg=$(echo "$msg" | tr '[:upper:]' '[:lower:]')
+  local lower_msg
+  lower_msg=$(printf '%s' "$msg" | tr '[:upper:]' '[:lower:]')
 
-  if echo "$lower_msg" | grep -qE '(add|feat|new|introduce|create|init|implement)'; then
+  if printf '%s' "$lower_msg" | grep -qE '(add|feat|new|introduce|create|init|implement)'; then
     echo "ADDED"
-  elif echo "$lower_msg" | grep -qE '(fix|bug|patch|repair|correct|hotfix|resolve)'; then
+  elif printf '%s' "$lower_msg" | grep -qE '(fix|bug|patch|repair|correct|hotfix|resolve)'; then
     echo "FIXED"
-  elif echo "$lower_msg" | grep -qE '(remove|delete|drop|deprecate|uninstall|cleanup|rm)'; then
+  elif printf '%s' "$lower_msg" | grep -qE '(remove|delete|drop|deprecate|uninstall|cleanup)[[:space:]]'; then
     echo "REMOVED"
-  elif echo "$lower_msg" | grep -qE '(change|update|modify|refactor|improve|optimize|upgrade|upgrade|revise)'; then
-    echo "CHANGED"
   else
     echo "CHANGED"
   fi
@@ -64,31 +64,54 @@ categorize() {
 # Collect commits
 echo "Generating changelog from: ${RANGE}..."
 
-while IFS='||' read -r subject body _; do
+git log "$RANGE" --pretty=format:"%s" 2>/dev/null | while IFS= read -r subject; do
+  # Skip merge commits
+  case "$subject" in Merge*) continue ;; esac
+  # Skip empty
   [[ -z "$subject" ]] && continue
 
-  # Skip merge commits
-  [[ "$subject" =~ ^Merge ]] && continue
-
-  # Skip tag commits
-  [[ "$subject" =~ ^ tagged ]] && continue
-
+  local category
   category=$(categorize "$subject")
+  local entry
   entry="- $subject"
 
-  case $category in
-    ADDED)   ADDED["$entry"]=1 ;;
-    FIXED)   FIXED["$entry"]=1 ;;
-    CHANGED) CHANGED["$entry"]=1 ;;
-    REMOVED) REMOVED["$entry"]=1 ;;
+  case "$category" in
+    ADDED)   echo "$entry" >> "$TMP_ADDED" ;;
+    FIXED)   echo "$entry" >> "$TMP_FIXED" ;;
+    CHANGED) echo "$entry" >> "$TMP_CHANGED" ;;
+    REMOVED) echo "$entry" >> "$TMP_REMOVED" ;;
   esac
-done < <(git log "$RANGE" --pretty=format:"%s||%b||%H" 2>/dev/null)
+done
 
 # Check if we have any changes
-if [[ ${#ADDED[@]} == 0 && ${#FIXED[@]} == 0 && ${#CHANGED[@]} == 0 && ${#REMOVED[@]} == 0 ]]; then
+if [[ ! -s "$TMP_ADDED" && ! -s "$TMP_FIXED" && ! -s "$TMP_CHANGED" && ! -s "$TMP_REMOVED" ]]; then
   echo "No commits found in range: $RANGE"
   exit 2
 fi
+
+# Sort and deduplicate
+sort_dedup() {
+  local file="$1"
+  if [[ ! -s "$file" ]]; then
+    return
+  fi
+  sort "$file" | uniq
+}
+
+# Count lines
+count_lines() {
+  local file="$1"
+  if [[ ! -s "$file" ]]; then
+    echo 0
+  else
+    wc -l < "$file" | tr -d ' '
+  fi
+}
+
+NUM_ADDED=$(count_lines "$TMP_ADDED")
+NUM_FIXED=$(count_lines "$TMP_FIXED")
+NUM_CHANGED=$(count_lines "$TMP_CHANGED")
+NUM_REMOVED=$(count_lines "$TMP_REMOVED")
 
 # Generate changelog
 {
@@ -101,54 +124,39 @@ fi
   echo "$SECTION_HEADER"
   echo ""
   
-  if [[ ${#ADDED[@]} -gt 0 ]]; then
+  if [[ -s "$TMP_ADDED" ]]; then
     echo "### Added"
     echo ""
-    printf '%s\n' "${!ADDED[@]}" | sort
+    sort_dedup "$TMP_ADDED"
     echo ""
   fi
   
-  if [[ ${#FIXED[@]} -gt 0 ]]; then
+  if [[ -s "$TMP_FIXED" ]]; then
     echo "### Fixed"
     echo ""
-    printf '%s\n' "${!FIXED[@]}" | sort
+    sort_dedup "$TMP_FIXED"
     echo ""
   fi
   
-  if [[ ${#CHANGED[@]} -gt 0 ]]; then
+  if [[ -s "$TMP_CHANGED" ]]; then
     echo "### Changed"
     echo ""
-    printf '%s\n' "${!CHANGED[@]}" | sort
+    sort_dedup "$TMP_CHANGED"
     echo ""
   fi
   
-  if [[ ${#REMOVED[@]} -gt 0 ]]; then
+  if [[ -s "$TMP_REMOVED" ]]; then
     echo "### Removed"
     echo ""
-    printf '%s\n' "${!REMOVED[@]}" | sort
+    sort_dedup "$TMP_REMOVED"
     echo ""
   fi
-  
-  # Append old changelog if exists
-  if [[ -f "$OUTPUT_FILE" ]]; then
-    # Find where to split (after the first H2 or H1 header)
-    local_lines=$(awk '/^##? /{if(NR>1)print; found=1; exit} found{print}' "$OUTPUT_FILE" | tail -n +2)
-    if [[ -n "$local_lines" ]]; then
-      echo "---"
-      echo ""
-      echo "## History"
-      echo ""
-      echo "$local_lines"
-    fi
-  fi
-} > "$OUTPUT_FILE.tmp"
+} > "$OUTPUT_FILE"
 
-mv "$OUTPUT_FILE.tmp" "$OUTPUT_FILE"
-
-echo "✅ CHANGELOG.md generated successfully: $OUTPUT_FILE"
+echo "✅ CHANGELOG.md generated: $OUTPUT_FILE"
 echo ""
 echo "Summary:"
-[[ ${#ADDED[@]} -gt 0 ]] && echo "  Added:   ${#ADDED[@]}"
-[[ ${#FIXED[@]} -gt 0 ]] && echo "  Fixed:   ${#FIXED[@]}"
-[[ ${#CHANGED[@]} -gt 0 ]] && echo "  Changed: ${#CHANGED[@]}"
-[[ ${#REMOVED[@]} -gt 0 ]] && echo "  Removed: ${#REMOVED[@]}"
+echo "  Added:   $NUM_ADDED"
+echo "  Fixed:   $NUM_FIXED"
+echo "  Changed: $NUM_CHANGED"
+echo "  Removed: $NUM_REMOVED"
